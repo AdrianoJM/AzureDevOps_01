@@ -1,0 +1,86 @@
+trigger: none
+pool:
+  name: vm-rhel-agent
+variables:
+- group: dev-build-pipeline-variables
+- name: propertiesFileName
+  value: context_dev.zip
+
+jobs:
+- job: StartDelivery
+  steps:
+  - task: Bash@3
+    displayName: 'Check base variables'
+    inputs:
+      targetType: 'filePath'
+      filePath: 'startup-check-build-pipeline.sh'
+      failOnStderr: true
+- job: CreateTasksOnTAC
+  dependsOn: StartDelivery
+  condition: succeeded()
+  variables:
+    MAPPED_TAC_USER: $(tac.user)
+    MAPPED_TAC_PASS: $(tac.pass)
+  steps:
+  - checkout: none
+  - task: Bash@3
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo 'Getting package on Nexus... Creating TAC Task with artifact stored in Nexus'
+  - script: |
+      /bin/python3 -m pip install --upgrade pytacapi
+      /bin/python3 -m pip install pyyaml requests
+    displayName: 'Install pytacapi'
+  - task: PythonScript@0
+    displayName: 'Creating tasks on TAC'
+    inputs:
+      scriptSource: 'inline'
+      script: |
+        from pytacapi import TalendClient
+        tac = TalendClient()
+        tac.create_tasks()
+      arguments: -project $(project) -jobServer $(jobServer) -tac_url $(tac.url) -authUser $(MAPPED_TAC_USER) -authPass $(MAPPED_TAC_PASS) -country $(country) -database $(database) -context_base_dir $(context_base_dir) -batch_prop_file $(batch_prop_file) -ingestion_prop_file $(ingestion_prop_file) -dwh_prop_file $(dwh_prop_file) -dry_run $(dry_run)
+      pythonInterpreter: /bin/python3
+      workingDirectory: .
+- job: JobServerProperties
+  dependsOn: CreateTasksOnTAC
+  condition: and(succeeded(), ne(variables['dry_run'], 'True'))
+  displayName: 'Upload properties to Job Server. Ignore existing.'
+  variables:
+    MAPPED_SFTP_USER: $(sftp.user)
+    MAPPED_SFTP_PASS: $(sftp.pass)
+  steps:
+  - checkout: none
+  - task: DownloadSecureFile@1
+    displayName: Download stage properties file
+    name: propertiesFile
+    inputs:
+      secureFile: $(propertiesFileName)
+  - task: ExtractFiles@1
+    displayName: Extract context files
+    inputs:
+      archiveFilePatterns: '$(Agent.TempDirectory)/$(propertiesFileName)' 
+      destinationFolder: $(Agent.TempDirectory)
+      cleanDestinationFolder: false
+  - task: Bash@3
+    displayName: List temp files
+    inputs:
+      targetType: 'inline'
+      script: ls $(Agent.TempDirectory)
+  - task: Bash@3
+    displayName: Upload context files
+    inputs:
+      targetType: 'inline'
+      script: |
+        SSHPASS=$(MAPPED_SFTP_PASS) sshpass -e rsync -az --ignore-existing --progress $(Agent.TempDirectory)/*.txt $(MAPPED_SFTP_USER)@$(sftp.job.server.host):$(context_base_dir)
+- job: Finished
+  dependsOn: JobServerProperties
+  condition: succeeded()
+  steps:
+  - checkout: none
+  - task: Bash@3
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo 'Job completed!'
